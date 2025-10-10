@@ -95,7 +95,7 @@ def to_srt_time(sec: float) -> str:
 
 
 def merge_to_target_speakers(segments, target_speakers):
-    """Merge dynamic clusters to exactly target_speakers."""
+    """Merge diarization output to exactly `target_speakers` groups."""
     if not segments:
         return segments
 
@@ -103,21 +103,25 @@ def merge_to_target_speakers(segments, target_speakers):
     if len(speakers) <= target_speakers:
         return segments  # already fine
 
-    # Simple heuristic: merge by temporal proximity
+    # Cluster based on average segment time (simple heuristic)
     centers = np.array([[np.mean([seg.start, seg.end])] for seg in segments])
     clustering = AgglomerativeClustering(
-        n_clusters=target_speakers, affinity="euclidean", linkage="average"
+        n_clusters=target_speakers, metric="euclidean", linkage="average"
     )
     new_labels = clustering.fit_predict(centers)
-    mapping = {}
-    for old, new in zip([seg.speaker for seg in segments], new_labels):
-        mapping[old] = new
-
-    for seg in segments:
-        seg.speaker = mapping.get(seg.speaker, seg.speaker)
+    # Build a new list of merged segments (not mutating sherpa objects)
+    merged_segments = []
+    for seg, new_label in zip(segments, new_labels):
+        merged_segments.append(
+            type("MergedSegment", (object,), {
+                "start": seg.start,
+                "end": seg.end,
+                "speaker": int(new_label)
+            })()
+        )
 
     print(f"🔁 Merged from {len(speakers)} → {target_speakers} speakers")
-    return segments
+    return merged_segments
 
 
 def detect_overlaps(segments, sr, audio, overlap_window=0.1):
