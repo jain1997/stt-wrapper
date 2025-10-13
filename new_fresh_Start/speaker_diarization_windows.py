@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 from pathlib import Path
 import soundfile as sf
@@ -100,16 +101,12 @@ def load_whisper_pipeline():
 
 
 # -------------------------------------------------------------------
-# 🧩 Merge Multi-Chunk Diarization Results (Python Safe)
+# 🧩 Merge Multi-Chunk Diarization Results
 # -------------------------------------------------------------------
 def merge_results(all_results, sr, chunk_durations):
-    """
-    Merge diarization segments from multiple chunks into one continuous timeline.
-    Returns a list of dicts: [{'start': float, 'end': float, 'speaker': int}, ...]
-    """
+    """Merge diarization segments from multiple chunks"""
     merged = []
     offset = 0.0
-
     for res, dur in zip(all_results, chunk_durations):
         for seg in res:
             merged.append({
@@ -118,18 +115,25 @@ def merge_results(all_results, sr, chunk_durations):
                 "speaker": seg.speaker
             })
         offset += dur
-
     merged.sort(key=lambda x: x["start"])
     return merged
 
 
 # -------------------------------------------------------------------
-# 🧩 Generate SRT Subtitles
+# 🧩 Generate SRT (with automatic ≤30 s chunking)
 # -------------------------------------------------------------------
-def generate_srt(segments, audio, sr, pipe, output_path="output.srt"):
+def generate_srt(segments, audio, sr, pipe, output_path="output.srt", max_chunk_sec=30):
+    """
+    Generate SRT with Whisper transcription, automatically splitting
+    long audio (>30 s) into sub-chunks to avoid the 3000-mel limit.
+    """
     srt_lines = []
     idx = 1
-    print("\n🗣️ Transcribing diarized segments...")
+    print("\n🗣️ Transcribing diarized segments (≤30 s sub-chunks)...")
+
+    def split_audio_chunk(clip, sr, max_sec=max_chunk_sec):
+        samples_per_chunk = int(max_sec * sr)
+        return [clip[i:i + samples_per_chunk] for i in range(0, len(clip), samples_per_chunk)]
 
     for seg in tqdm(segments, desc="Transcribing", unit="segment"):
         start, end, spk = seg["start"], seg["end"], seg["speaker"]
@@ -138,11 +142,21 @@ def generate_srt(segments, audio, sr, pipe, output_path="output.srt"):
         start_samp, end_samp = int(start * sr), int(end * sr)
         clip = audio[start_samp:end_samp]
 
-        # Run Whisper transcription
-        text = pipe(clip)["text"].strip()
+        # ---- FIX: Split long clips ----
+        subclips = split_audio_chunk(clip, sr, max_chunk_sec)
+        text_parts = []
+        for i, subclip in enumerate(subclips):
+            try:
+                result = pipe(subclip)
+                text_parts.append(result["text"].strip())
+            except Exception as e:
+                print(f"⚠️ Whisper failed on subclip {i+1} ({len(subclip)/sr:.1f}s): {e}")
+
+        text = " ".join(text_parts).strip()
         srt_lines.append(f"{idx}\n{sec_to_srt_time(start)} --> {sec_to_srt_time(end)}\n{speaker}: {text}\n")
         idx += 1
 
+    # Save final SRT
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(srt_lines))
     print(f"\n✅ Final SRT saved → {output_path}")
@@ -160,34 +174,28 @@ def main():
     audio, sr = sf.read(wav_file, dtype="float32", always_2d=True)
     audio = audio[:, 0]
 
-    # Initialize Sherpa
     print("\n🔊 Initializing speaker diarization...")
     sd = init_diarization(num_speakers=2)
-
-    # Resample
     audio, sr = resample_audio(audio, sr, sd.sample_rate)
 
-    # Split if long
+    # Split if long (10 min chunks for safety)
     chunks = split_audio(audio, sr, max_duration_sec=600)
     print(f"🧩 Total chunks: {len(chunks)}")
 
     all_results = []
     durations = [len(c) / sr for c in chunks]
 
-    # Process each chunk
     for i, chunk in enumerate(chunks, 1):
         print(f"\n🕵️ Processing chunk {i}/{len(chunks)} ({len(chunk)/sr:.1f}s)...")
         result = sd.process(chunk)
         all_results.append(result.sort_by_start_time())
 
-    # Merge all results
+    # Merge diarization results
     full_result = merge_results(all_results, sr, durations)
     print(f"✅ Diarization complete → {len(full_result)} total segments")
 
-    # Load Whisper pipeline
+    # Load Whisper and transcribe
     pipe = load_whisper_pipeline()
-
-    # Transcribe and save SRT
     generate_srt(full_result, audio, sr, pipe, output_path="wind_testing-rec.srt")
 
 
