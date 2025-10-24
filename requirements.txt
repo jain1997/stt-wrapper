@@ -1,0 +1,8 @@
+numpy
+soundfile
+librosa
+torch
+transformers
+tqdm
+sherpa-onnx
+pyyaml
